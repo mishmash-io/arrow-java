@@ -88,7 +88,8 @@ public class GetReadableBuffer {
       throws IOException {
     ReadableBuffer readableBuffer = fastPath ? getReadableBuffer(stream) : null;
     if (readableBuffer != null) {
-      readableBuffer.readBytes(buf.nioBuffer(0, size));
+      // TODO: getByteBuffer() is an optional operation, might not be implemented
+      buf.setBytes(0, readableBuffer.readBytes(size).getByteBuffer(), 0, size);
     } else {
       byte[] heapBytes = new byte[size];
       ByteStreams.readFully(stream, heapBytes);
