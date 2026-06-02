@@ -14,34 +14,43 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.arrow.vector.complex.impl;
+package org.apache.arrow.variant.holders;
 
-import java.nio.ByteBuffer;
-import java.util.UUID;
-import org.apache.arrow.vector.UuidVector;
-import org.apache.arrow.vector.holder.UuidHolder;
+import org.apache.arrow.memory.ArrowBuf;
+import org.apache.arrow.variant.extension.VariantType;
 import org.apache.arrow.vector.holders.ExtensionHolder;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 
-public class UuidWriterImpl extends AbstractExtensionTypeWriter<UuidVector> {
+@SuppressWarnings("checkstyle:VisibilityModifier")
+public final class NullableVariantHolder extends ExtensionHolder {
 
-  public UuidWriterImpl(UuidVector vector) {
-    super(vector);
+  public int isSet;
+  public int metadataStart;
+  public int metadataEnd;
+  public ArrowBuf metadataBuffer;
+  public int valueStart;
+  public int valueEnd;
+  public ArrowBuf valueBuffer;
+
+  public NullableVariantHolder() {}
+
+  @Override
+  public boolean equals(Object obj) {
+    throw new UnsupportedOperationException();
   }
 
   @Override
-  public void writeExtension(Object value) {
-    UUID uuid = (UUID) value;
-    ByteBuffer bb = ByteBuffer.allocate(16);
-    bb.putLong(uuid.getMostSignificantBits());
-    bb.putLong(uuid.getLeastSignificantBits());
-    vector.setSafe(getPosition(), bb.array());
-    vector.setValueCount(getPosition() + 1);
+  public int hashCode() {
+    throw new UnsupportedOperationException();
   }
 
   @Override
-  public void write(ExtensionHolder holder) {
-    UuidHolder uuidHolder = (UuidHolder) holder;
-    vector.setSafe(getPosition(), uuidHolder.value);
-    vector.setValueCount(getPosition() + 1);
+  public String toString() {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public ArrowType type() {
+    return VariantType.INSTANCE;
   }
 }

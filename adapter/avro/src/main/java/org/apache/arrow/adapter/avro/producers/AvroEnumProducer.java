@@ -17,22 +17,22 @@
 package org.apache.arrow.adapter.avro.producers;
 
 import java.io.IOException;
-import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.BaseIntVector;
 import org.apache.avro.io.Encoder;
 
 /**
- * Producer that produces enum values from a dictionary-encoded {@link IntVector}, writes data to an
- * Avro encoder.
+ * Producer that produces enum values from a dictionary-encoded {@link BaseIntVector}, writes data
+ * to an Avro encoder.
  */
-public class AvroEnumProducer extends BaseAvroProducer<IntVector> {
+public class AvroEnumProducer extends BaseAvroProducer<BaseIntVector> {
 
   /** Instantiate an AvroEnumProducer. */
-  public AvroEnumProducer(IntVector vector) {
+  public AvroEnumProducer(BaseIntVector vector) {
     super(vector);
   }
 
   @Override
   public void produce(Encoder encoder) throws IOException {
-    encoder.writeEnum(vector.get(currentIndex++));
+    encoder.writeEnum((int) vector.getValueAsLong(currentIndex++));
   }
 }

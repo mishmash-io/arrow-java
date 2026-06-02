@@ -14,10 +14,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.arrow.vector.holder;
+package org.apache.arrow.driver.jdbc.client.oauth;
 
-import org.apache.arrow.vector.holders.ExtensionHolder;
+import java.sql.SQLException;
 
-public class UuidHolder extends ExtensionHolder {
-  public byte[] value;
+/**
+ * Interface for OAuth token providers that handle token acquisition and refresh. Implementations
+ * should cache tokens and automatically refresh them before expiration.
+ */
+public interface OAuthTokenProvider {
+  /**
+   * Gets a valid OAuth access token, refreshing if necessary.
+   *
+   * @return a valid access token string
+   * @throws SQLException if token cannot be obtained
+   */
+  String getValidToken() throws SQLException;
 }

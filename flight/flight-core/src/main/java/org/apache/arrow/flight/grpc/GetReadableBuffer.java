@@ -87,14 +87,13 @@ public class GetReadableBuffer {
       final InputStream stream, final ArrowBuf buf, final int size, final boolean fastPath)
       throws IOException {
     ReadableBuffer readableBuffer = fastPath ? getReadableBuffer(stream) : null;
+    byte[] heapBytes = new byte[size];
     if (readableBuffer != null) {
-      // TODO: getByteBuffer() is an optional operation, might not be implemented
-      buf.setBytes(0, readableBuffer.readBytes(size).getByteBuffer(), 0, size);
+      readableBuffer.readBytes(heapBytes, 0, size);
     } else {
-      byte[] heapBytes = new byte[size];
       ByteStreams.readFully(stream, heapBytes);
-      buf.writeBytes(heapBytes);
     }
+    buf.writeBytes(heapBytes);
     buf.writerIndex(size);
   }
 }

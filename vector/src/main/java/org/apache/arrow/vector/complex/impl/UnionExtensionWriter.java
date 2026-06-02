@@ -60,11 +60,6 @@ public class UnionExtensionWriter extends AbstractFieldWriter {
   }
 
   @Override
-  public void addExtensionTypeWriterFactory(ExtensionTypeWriterFactory factory) {
-    this.writer = factory.getWriterImpl(vector);
-    this.writer.setPosition(idx());
-  }
-
   public void write(ExtensionHolder holder) {
     this.writer.write(holder);
   }
@@ -75,5 +70,11 @@ public class UnionExtensionWriter extends AbstractFieldWriter {
     if (this.writer != null) {
       this.writer.setPosition(index);
     }
+  }
+
+  @Override
+  public void writeNull() {
+    this.vector.setNull(getPosition());
+    this.vector.setValueCount(getPosition() + 1);
   }
 }

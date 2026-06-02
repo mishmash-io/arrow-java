@@ -14,18 +14,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.arrow.vector.complex.impl;
+package org.apache.arrow.vector.complex.reader;
 
-import org.apache.arrow.vector.ExtensionTypeVector;
-import org.apache.arrow.vector.UuidVector;
+import org.apache.arrow.vector.holders.ExtensionHolder;
 
-public class UuidWriterFactory implements ExtensionTypeWriterFactory {
+/** Interface for reading extension types. Extends the functionality of {@link BaseReader}. */
+public interface ExtensionReader extends BaseReader {
 
-  @Override
-  public AbstractFieldWriter getWriterImpl(ExtensionTypeVector extensionTypeVector) {
-    if (extensionTypeVector instanceof UuidVector) {
-      return new UuidWriterImpl((UuidVector) extensionTypeVector);
-    }
-    return null;
-  }
+  /**
+   * Reads to the given extension holder.
+   *
+   * @param holder the {@link ExtensionHolder} to read
+   */
+  void read(ExtensionHolder holder);
+
+  /**
+   * Reads and returns an object representation of the extension type.
+   *
+   * @return the object representation of the extension type
+   */
+  Object readObject();
+
+  /**
+   * Checks if the current value is set.
+   *
+   * @return true if the value is set, false otherwise
+   */
+  boolean isSet();
 }
