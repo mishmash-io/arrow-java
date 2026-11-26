@@ -22,7 +22,7 @@ under the License.
   <parent>
     <groupId>org.apache.arrow</groupId>
     <artifactId>arrow-flight</artifactId>
-    <version>19.0.0</version>
+    <version>20.0.0</version>
   </parent>
 
   <artifactId>flight-integration-tests</artifactId>
@@ -101,7 +101,7 @@ under the License.
                 </filter>
               </filters>
               <transformers>
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"></transformer>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.IncludeResourceTransformer">
                   <resource>META-INF/LICENSE.txt</resource>
                   <file>src/shade/LICENSE.txt</file>

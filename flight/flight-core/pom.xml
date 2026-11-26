@@ -22,7 +22,7 @@ under the License.
   <parent>
     <groupId>org.apache.arrow</groupId>
     <artifactId>arrow-flight</artifactId>
-    <version>19.0.0</version>
+    <version>20.0.0</version>
   </parent>
 
   <artifactId>flight-core</artifactId>
@@ -32,8 +32,7 @@ under the License.
 
   <properties>
     <forkCount>1</forkCount>
-    <!-- List of add-opens arg line arguments for this module's tests -->
-    <surefire.add-opens.argLine>--add-opens=org.apache.arrow.flight.core/org.apache.arrow.flight.perf.impl=protobuf.java --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</surefire.add-opens.argLine>
+    <surefire.argLine.extend>--add-opens=org.apache.arrow.flight.core/org.apache.arrow.flight.perf.impl=protobuf.java</surefire.argLine.extend>
   </properties>
 
   <dependencies>
@@ -134,7 +133,7 @@ under the License.
     <dependency>
       <groupId>com.google.api.grpc</groupId>
       <artifactId>proto-google-common-protos</artifactId>
-      <version>2.66.0</version>
+      <version>2.81.0</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -152,7 +151,6 @@ under the License.
       <plugin>
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
-          <argLine combine.self="override">--add-opens=org.apache.arrow.flight.core/org.apache.arrow.flight.perf.impl=protobuf.java --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</argLine>
           <enableAssertions>false</enableAssertions>
           <systemPropertyVariables>
             <arrow.test.dataRoot>${project.basedir}/../../testing/data</arrow.test.dataRoot>
@@ -202,4 +200,41 @@ under the License.
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <id>native-epoll-test</id>
+      <activation>
+        <os>
+          <family>linux</family>
+        </os>
+      </activation>
+      <dependencies>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-epoll</artifactId>
+          <version>${dep.netty-bom.version}</version>
+          <classifier>${os.detected.classifier}</classifier>
+          <scope>test</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>native-kqueue-test</id>
+      <activation>
+        <os>
+          <family>mac</family>
+        </os>
+      </activation>
+      <dependencies>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-kqueue</artifactId>
+          <version>${dep.netty-bom.version}</version>
+          <classifier>${os.detected.classifier}</classifier>
+          <scope>test</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+  </profiles>
 </project>

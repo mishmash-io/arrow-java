@@ -18,12 +18,12 @@ package org.apache.arrow.flight;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.common.io.ByteStreams;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
 import io.grpc.Drainable;
+import io.grpc.KnownLength;
 import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.protobuf.ProtoUtils;
 import io.netty.buffer.ByteBuf;
@@ -55,9 +55,14 @@ import org.apache.arrow.vector.ipc.message.MessageMetadataResult;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.MetadataVersion;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** The in-memory representation of FlightData used to manage a stream of Arrow messages. */
 class ArrowMessage implements AutoCloseable {
+
+  // Must be declared before the static initializer below, which logs invalid settings.
+  private static final Logger logger = LoggerFactory.getLogger(ArrowMessage.class);
 
   // If true, deserialize Arrow data by giving Arrow a reference to the underlying gRPC buffer
   // instead of copying the data. Defaults to true.
@@ -65,6 +70,10 @@ class ArrowMessage implements AutoCloseable {
   // If true, serialize Arrow data by giving gRPC a reference to the underlying Arrow buffer
   // instead of copying the data. Defaults to false.
   public static final boolean ENABLE_ZERO_COPY_WRITE;
+
+  // Maximum nesting depth of groups in unknown fields that are skipped. Defaults to 100, like the
+  // recursion limit of protobuf-java.
+  static final int MAX_PROTOBUF_SKIP_GROUP_DEPTH;
 
   static {
     String zeroCopyReadFlag = System.getProperty("arrow.flight.enable_zero_copy_read");
@@ -77,6 +86,33 @@ class ArrowMessage implements AutoCloseable {
     }
     ENABLE_ZERO_COPY_READ = !"false".equalsIgnoreCase(zeroCopyReadFlag);
     ENABLE_ZERO_COPY_WRITE = "true".equalsIgnoreCase(zeroCopyWriteFlag);
+
+    String maxGroupDepth = System.getProperty("arrow.flight.max_protobuf_skip_group_depth");
+    if (maxGroupDepth == null) {
+      maxGroupDepth = System.getenv("ARROW_FLIGHT_MAX_PROTOBUF_SKIP_GROUP_DEPTH");
+    }
+    MAX_PROTOBUF_SKIP_GROUP_DEPTH = parseMaxGroupDepth(maxGroupDepth);
+  }
+
+  private static final int DEFAULT_MAX_PROTOBUF_SKIP_GROUP_DEPTH = 100;
+
+  private static int parseMaxGroupDepth(String value) {
+    if (value == null) {
+      return DEFAULT_MAX_PROTOBUF_SKIP_GROUP_DEPTH;
+    }
+    try {
+      final int depth = Integer.parseInt(value.trim());
+      if (depth >= 0) {
+        return depth;
+      }
+    } catch (NumberFormatException e) {
+      // fall through to the default
+    }
+    logger.warn(
+        "Invalid maximum protobuf group depth '{}', using the default of {}",
+        value,
+        DEFAULT_MAX_PROTOBUF_SKIP_GROUP_DEPTH);
+    return DEFAULT_MAX_PROTOBUF_SKIP_GROUP_DEPTH;
   }
 
   private static final int DESCRIPTOR_TAG =
@@ -87,6 +123,18 @@ class ArrowMessage implements AutoCloseable {
       (FlightData.DATA_HEADER_FIELD_NUMBER << 3) | WireFormat.WIRETYPE_LENGTH_DELIMITED;
   private static final int APP_METADATA_TAG =
       (FlightData.APP_METADATA_FIELD_NUMBER << 3) | WireFormat.WIRETYPE_LENGTH_DELIMITED;
+
+  // Wire sizes of protobuf values. protobuf-java declares these in WireFormat with the same names,
+  // but they are package-private.
+
+  /** Size in bytes of a fixed32 value. */
+  private static final int FIXED32_SIZE = 4;
+
+  /** Size in bytes of a fixed64 value. */
+  private static final int FIXED64_SIZE = 8;
+
+  /** Maximum size in bytes of an encoded varint, i.e. of a 64-bit value. */
+  private static final int MAX_VARINT_SIZE = 10;
 
   private static final Marshaller<FlightData> NO_BODY_MARSHALLER =
       ProtoUtils.marshaller(FlightData.getDefaultInstance());
@@ -281,11 +329,11 @@ class ArrowMessage implements AutoCloseable {
 
   private static ArrowMessage frame(BufferAllocator allocator, final InputStream stream) {
 
+    ArrowBuf body = null;
+    ArrowBuf appMetadata = null;
     try {
       FlightDescriptor descriptor = null;
       MessageMetadataResult header = null;
-      ArrowBuf body = null;
-      ArrowBuf appMetadata = null;
       while (stream.available() > 0) {
         final int tagFirstByte = stream.read();
         if (tagFirstByte == -1) {
@@ -295,25 +343,24 @@ class ArrowMessage implements AutoCloseable {
         switch (tag) {
           case DESCRIPTOR_TAG:
             {
-              int size = readRawVarint32(stream);
-              byte[] bytes = new byte[size];
-              ByteStreams.readFully(stream, bytes);
+              byte[] bytes = readFieldBytes(stream);
               descriptor = FlightDescriptor.parseFrom(bytes);
               break;
             }
           case HEADER_TAG:
             {
-              int size = readRawVarint32(stream);
-              byte[] bytes = new byte[size];
-              ByteStreams.readFully(stream, bytes);
-              header = MessageMetadataResult.create(ByteBuffer.wrap(bytes), size);
+              byte[] bytes = readFieldBytes(stream);
+              header = MessageMetadataResult.create(ByteBuffer.wrap(bytes), bytes.length);
               break;
             }
           case APP_METADATA_TAG:
             {
-              int size = readRawVarint32(stream);
-              appMetadata = allocator.buffer(size);
-              GetReadableBuffer.readIntoBuffer(stream, appMetadata, size, ENABLE_ZERO_COPY_READ);
+              if (appMetadata != null) {
+                // only read last app metadata.
+                appMetadata.close();
+                appMetadata = null;
+              }
+              appMetadata = readFieldBuffer(allocator, stream);
               break;
             }
           case BODY_TAG:
@@ -322,13 +369,14 @@ class ArrowMessage implements AutoCloseable {
               body.getReferenceManager().release();
               body = null;
             }
-            int size = readRawVarint32(stream);
-            body = allocator.buffer(size);
-            GetReadableBuffer.readIntoBuffer(stream, body, size, ENABLE_ZERO_COPY_READ);
+            body = readFieldBuffer(allocator, stream);
             break;
 
           default:
-            // ignore unknown fields.
+            // Anything else is an unknown field, including a known field number sent with another
+            // wire type than expected. As in protobuf, it is skipped, not rejected.
+            skipField(stream, tag);
+            break;
         }
       }
       // Protobuf implementations can omit empty fields, such as body; for some message types, like
@@ -364,6 +412,8 @@ class ArrowMessage implements AutoCloseable {
       }
       return new ArrowMessage(descriptor, header, appMetadata, body);
     } catch (Exception ioe) {
+      // No ArrowMessage takes ownership of the buffers read so far, so release them here.
+      AutoCloseables.close(ioe, appMetadata, body);
       throw new RuntimeException(ioe);
     }
   }
@@ -375,6 +425,165 @@ class ArrowMessage implements AutoCloseable {
 
   private static int readRawVarint32(int firstByte, InputStream is) throws IOException {
     return CodedInputStream.readRawVarint32(firstByte, is);
+  }
+
+  /**
+   * Read and validate the length prefix of a length-delimited field.
+   *
+   * <p>The length is read straight off the wire, so it must not size an allocation unchecked. It
+   * can only be compared to the bytes left in the message when the stream is {@link KnownLength}:
+   * {@code available()} means something else on other streams (the decompressing stream gRPC uses
+   * for compressed messages reports 1 until EOF), so for those the read itself bounds the
+   * allocation, see {@link #readFieldBytes}.
+   */
+  private static int readFieldLength(InputStream stream) throws IOException {
+    final int size = readRawVarint32(stream);
+    if (size < 0) {
+      throw new IOException("Malformed FlightData frame: negative field length " + size);
+    }
+    if (stream instanceof KnownLength && size > stream.available()) {
+      throw fieldTooLong(size, stream.available());
+    }
+    return size;
+  }
+
+  /**
+   * Read a length-delimited field into a byte array.
+   *
+   * <p>{@link InputStream#readNBytes(int)} grows the array as bytes arrive, so a length prefix
+   * larger than the message is rejected without allocating the declared length first.
+   */
+  private static byte[] readFieldBytes(InputStream stream) throws IOException {
+    final int size = readFieldLength(stream);
+    final byte[] bytes = stream.readNBytes(size);
+    if (bytes.length != size) {
+      throw fieldTooLong(size, bytes.length);
+    }
+    return bytes;
+  }
+
+  /** Read a length-delimited field into a new buffer. The caller must release the buffer. */
+  private static ArrowBuf readFieldBuffer(BufferAllocator allocator, InputStream stream)
+      throws IOException {
+    if (!(stream instanceof KnownLength)) {
+      // The length can't be checked up front, so only allocate once the bytes have arrived.
+      final byte[] bytes = readFieldBytes(stream);
+      final ArrowBuf buf = allocator.buffer(bytes.length);
+      buf.writeBytes(bytes);
+      return buf;
+    }
+    final int size = readFieldLength(stream);
+    final ArrowBuf buf = allocator.buffer(size);
+    try {
+      GetReadableBuffer.readIntoBuffer(stream, buf, size, ENABLE_ZERO_COPY_READ);
+    } catch (IOException | RuntimeException e) {
+      buf.close();
+      throw e;
+    }
+    return buf;
+  }
+
+  /** Skip the value of a field whose tag has just been read, without buffering it. */
+  private static void skipField(InputStream stream, int tag) throws IOException {
+    skipField(stream, tag, 0);
+  }
+
+  private static void skipField(InputStream stream, int tag, int depth) throws IOException {
+    switch (WireFormat.getTagWireType(tag)) {
+      case WireFormat.WIRETYPE_VARINT:
+        skipVarint(stream);
+        break;
+      case WireFormat.WIRETYPE_FIXED64:
+        skipFully(stream, FIXED64_SIZE);
+        break;
+      case WireFormat.WIRETYPE_LENGTH_DELIMITED:
+        skipFully(stream, readFieldLength(stream));
+        break;
+      case WireFormat.WIRETYPE_START_GROUP:
+        if (depth >= MAX_PROTOBUF_SKIP_GROUP_DEPTH) {
+          throw new IOException(
+              "Malformed FlightData frame: groups nested deeper than "
+                  + MAX_PROTOBUF_SKIP_GROUP_DEPTH
+                  + " levels");
+        }
+        skipGroup(stream, WireFormat.getTagFieldNumber(tag), depth + 1);
+        break;
+      case WireFormat.WIRETYPE_FIXED32:
+        skipFully(stream, FIXED32_SIZE);
+        break;
+      default:
+        // An end group without a matching start group, or an invalid wire type.
+        throw new IOException(
+            "Malformed FlightData frame: unexpected wire type "
+                + WireFormat.getTagWireType(tag)
+                + " for field "
+                + WireFormat.getTagFieldNumber(tag));
+    }
+  }
+
+  /** Skip the fields of a group up to and including its matching end group tag. */
+  private static void skipGroup(InputStream stream, int fieldNumber, int depth) throws IOException {
+    while (true) {
+      final int firstByte = stream.read();
+      if (firstByte == -1) {
+        throw new IOException("Malformed FlightData frame: unterminated group " + fieldNumber);
+      }
+      final int tag = readRawVarint32(firstByte, stream);
+      if (tag == 0) {
+        throw new IOException("Malformed FlightData frame: invalid tag 0 in group " + fieldNumber);
+      }
+      if (WireFormat.getTagWireType(tag) == WireFormat.WIRETYPE_END_GROUP) {
+        if (WireFormat.getTagFieldNumber(tag) != fieldNumber) {
+          throw new IOException(
+              "Malformed FlightData frame: group "
+                  + fieldNumber
+                  + " ended by group "
+                  + WireFormat.getTagFieldNumber(tag));
+        }
+        return;
+      }
+      skipField(stream, tag, depth);
+    }
+  }
+
+  /** Skip a varint of up to {@link #MAX_VARINT_SIZE} bytes. */
+  private static void skipVarint(InputStream stream) throws IOException {
+    for (int i = 0; i < MAX_VARINT_SIZE; i++) {
+      final int b = stream.read();
+      if (b == -1) {
+        throw new IOException("Malformed FlightData frame: truncated varint");
+      }
+      if ((b & 0x80) == 0) {
+        return;
+      }
+    }
+    throw new IOException(
+        "Malformed FlightData frame: varint longer than " + MAX_VARINT_SIZE + " bytes");
+  }
+
+  /** Skip exactly {@code size} bytes, failing if the stream ends first. */
+  private static void skipFully(InputStream stream, long size) throws IOException {
+    long remaining = size;
+    while (remaining > 0) {
+      final long skipped = stream.skip(remaining);
+      if (skipped > 0) {
+        remaining -= skipped;
+      } else if (stream.read() == -1) {
+        // skip() may return 0 without being at EOF, so probe with a single-byte read.
+        throw fieldTooLong(size, size - remaining);
+      } else {
+        remaining--;
+      }
+    }
+  }
+
+  private static IOException fieldTooLong(long size, long remaining) {
+    return new IOException(
+        "Malformed FlightData frame: field length "
+            + size
+            + " exceeds "
+            + remaining
+            + " bytes remaining in the message");
   }
 
   /**

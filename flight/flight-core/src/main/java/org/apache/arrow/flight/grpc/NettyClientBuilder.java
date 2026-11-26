@@ -19,8 +19,8 @@ package org.apache.arrow.flight.grpc;
 import io.grpc.ManagedChannel;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NettyChannelBuilder;
+import io.netty.channel.Channel;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.ServerChannel;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import java.io.InputStream;
@@ -130,7 +130,13 @@ public class NettyClientBuilder {
     return this;
   }
 
-  /** Create the client from this builder. */
+  /**
+   * Create the client from this builder.
+   *
+   * @throws IllegalArgumentException if the URI uses a TCP-based scheme ({@code grpc}, {@code
+   *     grpc+tcp}, {@code grpc+tls}) and the URI contains no port, or a port outside the range [1,
+   *     65535].
+   */
   public NettyChannelBuilder build() {
     final NettyChannelBuilder builder;
 
@@ -139,7 +145,16 @@ public class NettyClientBuilder {
       case LocationSchemes.GRPC_INSECURE:
       case LocationSchemes.GRPC_TLS:
         {
-          builder = NettyChannelBuilder.forAddress(location.toSocketAddress());
+          final int port = location.getUri().getPort();
+          if (port == -1) {
+            throw new IllegalArgumentException(
+                "No port specified in location URI: " + location.getUri());
+          }
+          if (port < 1 || port > 65535) {
+            throw new IllegalArgumentException(
+                "Invalid port " + port + ": must be between 1 and 65535.");
+          }
+          builder = NettyChannelBuilder.forAddress(location.getUri().getHost(), port);
           break;
         }
       case LocationSchemes.GRPC_DOMAIN_SOCKET:
@@ -151,7 +166,7 @@ public class NettyClientBuilder {
               // Linux
               builder.channelType(
                   Class.forName("io.netty.channel.epoll.EpollDomainSocketChannel")
-                      .asSubclass(ServerChannel.class));
+                      .asSubclass(Channel.class));
               final EventLoopGroup elg =
                   Class.forName("io.netty.channel.epoll.EpollEventLoopGroup")
                       .asSubclass(EventLoopGroup.class)
@@ -162,7 +177,7 @@ public class NettyClientBuilder {
               // BSD
               builder.channelType(
                   Class.forName("io.netty.channel.kqueue.KQueueDomainSocketChannel")
-                      .asSubclass(ServerChannel.class));
+                      .asSubclass(Channel.class));
               final EventLoopGroup elg =
                   Class.forName("io.netty.channel.kqueue.KQueueEventLoopGroup")
                       .asSubclass(EventLoopGroup.class)

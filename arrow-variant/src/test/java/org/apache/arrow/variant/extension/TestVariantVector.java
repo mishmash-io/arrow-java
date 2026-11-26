@@ -30,6 +30,7 @@ import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.variant.Variant;
 import org.apache.arrow.variant.holders.NullableVariantHolder;
 import org.apache.arrow.variant.holders.VariantHolder;
+import org.apache.arrow.variant.impl.NullableVariantHolderReaderImpl;
 import org.apache.arrow.variant.impl.VariantReaderImpl;
 import org.apache.arrow.variant.impl.VariantWriterImpl;
 import org.apache.arrow.vector.holders.ExtensionHolder;
@@ -769,7 +770,9 @@ class TestVariantVector {
         ArrowBuf metadataBuf = allocator.buffer(10);
         ArrowBuf valueBuf = allocator.buffer(10)) {
 
-      byte[] metadata = new byte[] {1, 2};
+      // Version 1, empty dictionary (single header byte) - a structurally valid variant
+      // metadata, since getObject() eagerly parses the metadata header.
+      byte[] metadata = new byte[] {1};
       byte[] value = new byte[] {3, 4, 5};
       metadataBuf.setBytes(0, metadata);
       valueBuf.setBytes(0, value);
@@ -840,5 +843,17 @@ class TestVariantVector {
       // After clear, vector should be empty
       assertEquals(0, vector.getValueCount());
     }
+  }
+
+  /**
+   * Holder readers must expose their extension {@link ArrowType} via {@code getExtensionType()} so
+   * callers (notably {@code ComplexCopier}) can route values through union/promotable writers
+   * without depending on {@code getField()}, which is undefined for holder-backed readers.
+   */
+  @Test
+  void testNullableVariantHolderReaderImplGetExtensionType() {
+    NullableVariantHolder holder = new NullableVariantHolder();
+    NullableVariantHolderReaderImpl reader = new NullableVariantHolderReaderImpl(holder);
+    assertEquals(VariantType.INSTANCE, reader.getExtensionType());
   }
 }

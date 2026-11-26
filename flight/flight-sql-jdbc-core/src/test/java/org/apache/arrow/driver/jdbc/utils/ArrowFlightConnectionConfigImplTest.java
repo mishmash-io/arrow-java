@@ -20,6 +20,7 @@ import static java.lang.Runtime.getRuntime;
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.CATALOG;
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.CONNECT_TIMEOUT_MILLIS;
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.HOST;
+import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.HOSTNAME_OVERRIDE;
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.PASSWORD;
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.PORT;
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.THREAD_POOL_SIZE;
@@ -27,6 +28,7 @@ import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.USE_CLIENT_CACHE;
 import static org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty.USE_ENCRYPTION;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 
 import java.time.Duration;
@@ -36,9 +38,11 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 import org.apache.arrow.driver.jdbc.utils.ArrowFlightConnectionConfigImpl.ArrowFlightConnectionProperty;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 public final class ArrowFlightConnectionConfigImplTest {
 
@@ -69,6 +73,35 @@ public final class ArrowFlightConnectionConfigImplTest {
     assertThat(configFunction.apply(arrowFlightConnectionConfig), is(expected));
     assertThat(
         arrowFlightConnectionConfigFunction.apply(arrowFlightConnectionConfig), is(expected));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"true", "TRUE", "True", "tRuE", "1"})
+  public void testUseEncryptionAcceptsTruthyValuesCaseInsensitively(String value) {
+    // A connection string value like "TRUE" must enable TLS. Parsing it as false would
+    // silently downgrade the connection to plaintext and leak credentials.
+    properties.put(USE_ENCRYPTION.camelName(), value);
+    assertThat(arrowFlightConnectionConfig.useEncryption(), is(true));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"false", "FALSE", "0", ""})
+  public void testUseEncryptionRejectsFalsyValues(String value) {
+    properties.put(USE_ENCRYPTION.camelName(), value);
+    assertThat(arrowFlightConnectionConfig.useEncryption(), is(false));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", " "})
+  public void testBlankHostnameOverrideIsNull(String value) {
+    properties.put(HOSTNAME_OVERRIDE.camelName(), value);
+    assertThat(arrowFlightConnectionConfig.getHostnameOverride(), is(nullValue()));
+  }
+
+  @Test
+  public void testHostnameOverrideIsTrimmed() {
+    properties.put(HOSTNAME_OVERRIDE.camelName(), " flight.example.com ");
+    assertThat(arrowFlightConnectionConfig.getHostnameOverride(), is("flight.example.com"));
   }
 
   public static Stream<Arguments> provideParameters() {
@@ -106,6 +139,12 @@ public final class ArrowFlightConnectionConfigImplTest {
             useEncryption,
             (Function<ArrowFlightConnectionConfigImpl, ?>)
                 ArrowFlightConnectionConfigImpl::useEncryption),
+        Arguments.of(
+            HOSTNAME_OVERRIDE,
+            "flight.example.com",
+            "flight.example.com",
+            (Function<ArrowFlightConnectionConfigImpl, ?>)
+                ArrowFlightConnectionConfigImpl::getHostnameOverride),
         Arguments.of(
             THREAD_POOL_SIZE,
             threadPoolSize,

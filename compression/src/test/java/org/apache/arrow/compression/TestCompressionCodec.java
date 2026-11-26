@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -36,6 +37,7 @@ import java.util.function.BiConsumer;
 import java.util.stream.Stream;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.util.AutoCloseables;
 import org.apache.arrow.vector.IntVector;
@@ -59,9 +61,11 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.arrow.vector.util.ByteArrayReadableSeekableByteChannel;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Test cases for {@link CompressionCodec}s. */
 class TestCompressionCodec {
@@ -75,6 +79,27 @@ class TestCompressionCodec {
   @AfterEach
   void terminate() {
     allocator.close();
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void testCompressionAllocationFailureReleasesSource(boolean useZstd) {
+    CompressionCodec codec = useZstd ? new ZstdCompressionCodec() : new Lz4CompressionCodec();
+    try (IntVector vector = new IntVector("values", allocator);
+        VectorSchemaRoot root = VectorSchemaRoot.of(vector)) {
+      vector.allocateNew(1);
+      vector.set(0, 42);
+      root.setRowCount(1);
+      long allocatedBefore = allocator.getAllocatedMemory();
+      int referencesBefore = vector.getDataBuffer().getReferenceManager().getRefCount();
+      allocator.setLimit(allocatedBefore);
+      VectorUnloader unloader = new VectorUnloader(root, true, codec, true);
+
+      assertThrows(OutOfMemoryException.class, unloader::getRecordBatch);
+      assertEquals(allocatedBefore, allocator.getAllocatedMemory());
+      assertEquals(referencesBefore, vector.getDataBuffer().getReferenceManager().getRefCount());
+      assertEquals(42, vector.get(0));
+    }
   }
 
   static Collection<Arguments> codecs() {
@@ -229,6 +254,55 @@ class TestCompressionCodec {
 
     newVec.close();
     AutoCloseables.close(decompressedBuffers);
+  }
+
+  static Stream<CompressionCodec> compressingCodecs() {
+    return Stream.of(new Lz4CompressionCodec(), new ZstdCompressionCodec());
+  }
+
+  @ParameterizedTest
+  @MethodSource("compressingCodecs")
+  void testEmptyBufferWritesUncompressedSentinel(CompressionCodec codec) {
+    // GH-1196: an empty buffer must be encoded with the uncompressed-length
+    // sentinel (-1), not 0. A 0 prefix is undefined in the Arrow IPC format and
+    // is rejected by the C++ and Python implementations, even though Java itself
+    // accepts it on read.
+    ArrowBuf empty = allocator.buffer(1);
+    empty.writerIndex(0);
+
+    // compress() takes ownership of and closes the input buffer
+    ArrowBuf compressed = codec.compress(allocator, empty);
+
+    assertEquals(
+        CompressionUtil.NO_COMPRESSION_LENGTH,
+        compressed.getLong(0),
+        "empty buffer must use the -1 uncompressed sentinel, not 0");
+
+    // and it must still round-trip back to an empty buffer
+    ArrowBuf decompressed = codec.decompress(allocator, compressed);
+    assertEquals(0L, decompressed.writerIndex());
+
+    decompressed.close();
+  }
+
+  @Test
+  void testLz4DecompressRejectsWrongLength() {
+    byte[] data = new byte[512]; // all zeros, highly compressible
+    ArrowBuf orig = allocator.buffer(data.length);
+    orig.setBytes(0, data);
+    orig.writerIndex(data.length);
+
+    CompressionCodec codec = new Lz4CompressionCodec();
+    ArrowBuf compressed = codec.compress(allocator, orig);
+
+    // tamper with the 8-byte uncompressed-length prefix so it no longer matches
+    // the real decompressed size
+    compressed.setLong(0, 1_000_000L);
+
+    RuntimeException e =
+        assertThrows(RuntimeException.class, () -> codec.decompress(allocator, compressed));
+    assertTrue(e.getMessage().contains("decompressed length"));
+    compressed.close();
   }
 
   private static Stream<CompressionUtil.CodecType> codecTypes() {

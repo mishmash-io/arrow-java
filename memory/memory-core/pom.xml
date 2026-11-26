@@ -22,7 +22,7 @@ under the License.
   <parent>
     <groupId>org.apache.arrow</groupId>
     <artifactId>arrow-memory</artifactId>
-    <version>19.0.0</version>
+    <version>20.0.0</version>
   </parent>
 
   <artifactId>arrow-memory-core</artifactId>
@@ -31,8 +31,7 @@ under the License.
   <description>Core off-heap memory management libraries for Arrow ValueVectors.</description>
 
   <properties>
-    <!-- List of add-opens arg line arguments for this module's tests -->
-    <surefire.add-opens.argLine>--add-reads=org.apache.arrow.memory.core=ch.qos.logback.classic --add-opens=java.base/java.lang.reflect=org.apache.arrow.memory.core --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</surefire.add-opens.argLine>
+    <surefire.argLine.extend>--add-reads=org.apache.arrow.memory.core=ch.qos.logback.classic --add-opens=java.base/java.lang.reflect=org.apache.arrow.memory.core</surefire.argLine.extend>
   </properties>
 
   <dependencies>
@@ -84,7 +83,6 @@ under the License.
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
-          <argLine>--add-reads=org.apache.arrow.memory.core=ch.qos.logback.classic --add-opens=java.base/java.lang.reflect=org.apache.arrow.memory.core --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</argLine>
           <excludes>
             <!-- Test is only useful when NOT running with add-opens -->
             <exclude>**/TestOpens.java</exclude>
@@ -100,8 +98,8 @@ under the License.
             <phase>test</phase>
             <configuration>
               <!-- Do not inherit the default add-opens flag and excludes -->
-              <argLine combine.self="override"></argLine>
-              <excludes combine.self="override"></excludes>
+              <argLine combine.self="override"/>
+              <excludes combine.self="override"/>
               <includes>
                 <include>**/TestOpens.java</include>
               </includes>

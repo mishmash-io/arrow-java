@@ -112,6 +112,20 @@ public final class ArrowFlightConnectionConfigImpl extends ConnectionConfigImpl 
     return ArrowFlightConnectionProperty.TLS_ROOT_CERTS.getString(properties);
   }
 
+  /**
+   * Gets the hostname to use for TLS certificate verification and SNI instead of the host.
+   *
+   * @return the hostname override, or null if not set or blank.
+   */
+  public @Nullable String getHostnameOverride() {
+    final String hostnameOverride =
+        ArrowFlightConnectionProperty.HOSTNAME_OVERRIDE.getString(properties);
+    if (hostnameOverride == null || hostnameOverride.trim().isEmpty()) {
+      return null;
+    }
+    return hostnameOverride.trim();
+  }
+
   public String getClientCertificatePath() {
     return ArrowFlightConnectionProperty.CLIENT_CERTIFICATE.getString(properties);
   }
@@ -258,6 +272,7 @@ public final class ArrowFlightConnectionConfigImpl extends ConnectionConfigImpl 
     TRUST_STORE_PASSWORD("trustStorePassword", null, Type.STRING, false),
     USE_SYSTEM_TRUST_STORE("useSystemTrustStore", true, Type.BOOLEAN, false),
     TLS_ROOT_CERTS("tlsRootCerts", null, Type.STRING, false),
+    HOSTNAME_OVERRIDE("hostnameOverride", null, Type.STRING, false),
     CLIENT_CERTIFICATE("clientCertificate", null, Type.STRING, false),
     CLIENT_KEY("clientKey", null, Type.STRING, false),
     THREAD_POOL_SIZE("threadPoolSize", 1, Type.NUMBER, false),
@@ -333,7 +348,7 @@ public final class ArrowFlightConnectionConfigImpl extends ConnectionConfigImpl 
      */
     public Boolean getBoolean(final Properties properties) {
       final String valueFromProperties = String.valueOf(get(properties));
-      return valueFromProperties.equals("1") || valueFromProperties.equals("true");
+      return valueFromProperties.equals("1") || valueFromProperties.equalsIgnoreCase("true");
     }
 
     /**

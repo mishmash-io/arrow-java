@@ -119,17 +119,24 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
       return targetVector; // nothing to append, return
     }
 
+    validateDelta(deltaVector);
+
     int newValueCount = targetVector.getValueCount() + deltaVector.getValueCount();
 
     int targetDataSize =
         targetVector
             .getOffsetBuffer()
             .getInt((long) targetVector.getValueCount() * BaseVariableWidthVector.OFFSET_WIDTH);
+    // The delta vector's offset buffer need not start at zero (e.g. a vector imported through
+    // the C data interface from a sliced array), so the amount of data to append is the
+    // distance between its first and last offsets, not the last offset itself.
+    int deltaDataStart = deltaVector.getOffsetBuffer().getInt(0);
     int deltaDataSize =
         deltaVector
-            .getOffsetBuffer()
-            .getInt((long) deltaVector.getValueCount() * BaseVariableWidthVector.OFFSET_WIDTH);
-    int newValueCapacity = targetDataSize + deltaDataSize;
+                .getOffsetBuffer()
+                .getInt((long) deltaVector.getValueCount() * BaseVariableWidthVector.OFFSET_WIDTH)
+            - deltaDataStart;
+    int newValueCapacity = Math.addExact(targetDataSize, deltaDataSize);
 
     // make sure there is enough capacity
     while (targetVector.getValueCapacity() < newValueCount) {
@@ -148,10 +155,9 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
         targetVector.getValidityBuffer());
 
     // append data buffer
-    MemoryUtil.copyMemory(
-        deltaVector.getDataBuffer().memoryAddress(),
-        targetVector.getDataBuffer().memoryAddress() + targetDataSize,
-        deltaDataSize);
+    targetVector
+        .getDataBuffer()
+        .setBytes(targetDataSize, deltaVector.getDataBuffer(), deltaDataStart, deltaDataSize);
 
     // copy offset buffer
     MemoryUtil.copyMemory(
@@ -160,7 +166,7 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
             + (targetVector.getValueCount() + 1) * BaseVariableWidthVector.OFFSET_WIDTH,
         deltaVector.getValueCount() * BaseVariableWidthVector.OFFSET_WIDTH);
 
-    // increase each offset from the second buffer
+    // rebase each appended offset to the target's data, accounting for the delta's start offset
     for (int i = 0; i < deltaVector.getValueCount(); i++) {
       int oldOffset =
           targetVector
@@ -172,7 +178,7 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
           .getOffsetBuffer()
           .setInt(
               (long) (targetVector.getValueCount() + 1 + i) * BaseVariableWidthVector.OFFSET_WIDTH,
-              oldOffset + targetDataSize);
+              oldOffset - deltaDataStart + targetDataSize);
     }
     ((BaseVariableWidthVector) targetVector).setLastSet(newValueCount - 1);
     targetVector.setValueCount(newValueCount);
@@ -189,6 +195,8 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
       return targetVector; // nothing to append, return
     }
 
+    validateDelta(deltaVector);
+
     int newValueCount = targetVector.getValueCount() + deltaVector.getValueCount();
 
     long targetDataSize =
@@ -196,12 +204,16 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
             .getOffsetBuffer()
             .getLong(
                 (long) targetVector.getValueCount() * BaseLargeVariableWidthVector.OFFSET_WIDTH);
+    // see the corresponding comment in visit(BaseVariableWidthVector, Void): the delta's
+    // offset buffer need not start at zero
+    long deltaDataStart = deltaVector.getOffsetBuffer().getLong(0);
     long deltaDataSize =
         deltaVector
-            .getOffsetBuffer()
-            .getLong(
-                (long) deltaVector.getValueCount() * BaseLargeVariableWidthVector.OFFSET_WIDTH);
-    long newValueCapacity = targetDataSize + deltaDataSize;
+                .getOffsetBuffer()
+                .getLong(
+                    (long) deltaVector.getValueCount() * BaseLargeVariableWidthVector.OFFSET_WIDTH)
+            - deltaDataStart;
+    long newValueCapacity = Math.addExact(targetDataSize, deltaDataSize);
 
     // make sure there is enough capacity
     while (targetVector.getValueCapacity() < newValueCount) {
@@ -220,10 +232,9 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
         targetVector.getValidityBuffer());
 
     // append data buffer
-    MemoryUtil.copyMemory(
-        deltaVector.getDataBuffer().memoryAddress(),
-        targetVector.getDataBuffer().memoryAddress() + targetDataSize,
-        deltaDataSize);
+    targetVector
+        .getDataBuffer()
+        .setBytes(targetDataSize, deltaVector.getDataBuffer(), deltaDataStart, deltaDataSize);
 
     // copy offset buffer
     MemoryUtil.copyMemory(
@@ -232,7 +243,7 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
             + (targetVector.getValueCount() + 1) * BaseLargeVariableWidthVector.OFFSET_WIDTH,
         deltaVector.getValueCount() * BaseLargeVariableWidthVector.OFFSET_WIDTH);
 
-    // increase each offset from the second buffer
+    // rebase each appended offset to the target's data, accounting for the delta's start offset
     for (int i = 0; i < deltaVector.getValueCount(); i++) {
       long oldOffset =
           targetVector
@@ -245,11 +256,75 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
           .setLong(
               (long) (targetVector.getValueCount() + 1 + i)
                   * BaseLargeVariableWidthVector.OFFSET_WIDTH,
-              oldOffset + targetDataSize);
+              oldOffset - deltaDataStart + targetDataSize);
     }
     ((BaseLargeVariableWidthVector) targetVector).setLastSet(newValueCount - 1);
     targetVector.setValueCount(newValueCount);
     return targetVector;
+  }
+
+  /**
+   * Checks that the delta's validity and offset buffers cover its value count, and that its offsets
+   * are non-negative, non-decreasing and within its data buffer. This runs before the target is
+   * touched, so a malformed delta leaves the target unchanged.
+   */
+  private static void validateDelta(BaseVariableWidthVector deltaVector) {
+    int valueCount = deltaVector.getValueCount();
+    checkCapacity(
+        deltaVector.getValidityBuffer(),
+        BitVectorHelper.getValidityBufferSizeFromCount(valueCount),
+        "validity");
+    ArrowBuf offsets = deltaVector.getOffsetBuffer();
+    checkCapacity(offsets, (valueCount + 1L) * BaseVariableWidthVector.OFFSET_WIDTH, "offset");
+    int prev = offsets.getInt(0);
+    if (prev < 0) {
+      throw new IndexOutOfBoundsException("Delta vector has negative start offset " + prev);
+    }
+    for (int i = 1; i <= valueCount; i++) {
+      int cur = offsets.getInt((long) i * BaseVariableWidthVector.OFFSET_WIDTH);
+      if (cur < prev) {
+        throw new IndexOutOfBoundsException(
+            "Delta vector offsets decrease at index " + i + ": " + prev + " > " + cur);
+      }
+      prev = cur;
+    }
+    checkCapacity(deltaVector.getDataBuffer(), prev, "data");
+  }
+
+  /** See {@link #validateDelta(BaseVariableWidthVector)}. */
+  private static void validateDelta(BaseLargeVariableWidthVector deltaVector) {
+    int valueCount = deltaVector.getValueCount();
+    checkCapacity(
+        deltaVector.getValidityBuffer(),
+        BitVectorHelper.getValidityBufferSizeFromCount(valueCount),
+        "validity");
+    ArrowBuf offsets = deltaVector.getOffsetBuffer();
+    checkCapacity(offsets, (valueCount + 1L) * BaseLargeVariableWidthVector.OFFSET_WIDTH, "offset");
+    long prev = offsets.getLong(0);
+    if (prev < 0) {
+      throw new IndexOutOfBoundsException("Delta vector has negative start offset " + prev);
+    }
+    for (int i = 1; i <= valueCount; i++) {
+      long cur = offsets.getLong((long) i * BaseLargeVariableWidthVector.OFFSET_WIDTH);
+      if (cur < prev) {
+        throw new IndexOutOfBoundsException(
+            "Delta vector offsets decrease at index " + i + ": " + prev + " > " + cur);
+      }
+      prev = cur;
+    }
+    checkCapacity(deltaVector.getDataBuffer(), prev, "data");
+  }
+
+  private static void checkCapacity(ArrowBuf buffer, long required, String name) {
+    if (buffer.capacity() < required) {
+      throw new IndexOutOfBoundsException(
+          "Delta vector "
+              + name
+              + " buffer has capacity "
+              + buffer.capacity()
+              + ", needs "
+              + required);
+    }
   }
 
   @Override
@@ -331,16 +406,20 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
         targetVector
             .getOffsetBuffer()
             .getInt((long) targetVector.getValueCount() * ListVector.OFFSET_WIDTH);
-    int deltaListSize =
+    // see the corresponding comment in visit(BaseVariableWidthVector, Void): the delta's
+    // offset buffer need not start at zero
+    int deltaListStart = deltaVector.getOffsetBuffer().getInt(0);
+    int deltaListEnd =
         deltaVector
             .getOffsetBuffer()
             .getInt((long) deltaVector.getValueCount() * ListVector.OFFSET_WIDTH);
+    int deltaListSize = deltaListEnd - deltaListStart;
 
     ListVector targetListVector = (ListVector) targetVector;
 
     // make sure the underlying vector has value count set
     targetListVector.getDataVector().setValueCount(targetListSize);
-    deltaVector.getDataVector().setValueCount(deltaListSize);
+    deltaVector.getDataVector().setValueCount(deltaListEnd);
 
     // make sure there is enough capacity
     while (targetVector.getValueCapacity() < newValueCount) {
@@ -372,13 +451,16 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
           .getOffsetBuffer()
           .setInt(
               (long) (targetVector.getValueCount() + 1 + i) * ListVector.OFFSET_WIDTH,
-              oldOffset + targetListSize);
+              oldOffset - deltaListStart + targetListSize);
     }
     targetListVector.setLastSet(newValueCount - 1);
 
     // append underlying vectors
-    VectorAppender innerAppender = new VectorAppender(targetListVector.getDataVector());
-    deltaVector.getDataVector().accept(innerAppender, null);
+    appendDataVector(
+        targetListVector.getDataVector(),
+        deltaVector.getDataVector(),
+        deltaListStart,
+        deltaListSize);
 
     targetVector.setValueCount(newValueCount);
     return targetVector;
@@ -400,17 +482,21 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
         targetVector
             .getOffsetBuffer()
             .getLong((long) targetVector.getValueCount() * LargeListVector.OFFSET_WIDTH);
-    long deltaListSize =
+    // see the corresponding comment in visit(BaseVariableWidthVector, Void): the delta's
+    // offset buffer need not start at zero
+    long deltaListStart = deltaVector.getOffsetBuffer().getLong(0);
+    long deltaListEnd =
         deltaVector
             .getOffsetBuffer()
             .getLong((long) deltaVector.getValueCount() * LargeListVector.OFFSET_WIDTH);
+    long deltaListSize = deltaListEnd - deltaListStart;
 
-    ListVector targetListVector = (ListVector) targetVector;
+    LargeListVector targetListVector = (LargeListVector) targetVector;
 
     // make sure the underlying vector has value count set
     // todo recheck these casts when int64 vectors are supported
     targetListVector.getDataVector().setValueCount(checkedCastToInt(targetListSize));
-    deltaVector.getDataVector().setValueCount(checkedCastToInt(deltaListSize));
+    deltaVector.getDataVector().setValueCount(checkedCastToInt(deltaListEnd));
 
     // make sure there is enough capacity
     while (targetVector.getValueCapacity() < newValueCount) {
@@ -427,10 +513,10 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
 
     // append offset buffer
     MemoryUtil.copyMemory(
-        deltaVector.getOffsetBuffer().memoryAddress() + ListVector.OFFSET_WIDTH,
+        deltaVector.getOffsetBuffer().memoryAddress() + LargeListVector.OFFSET_WIDTH,
         targetVector.getOffsetBuffer().memoryAddress()
             + (targetVector.getValueCount() + 1) * LargeListVector.OFFSET_WIDTH,
-        (long) deltaVector.getValueCount() * ListVector.OFFSET_WIDTH);
+        (long) deltaVector.getValueCount() * LargeListVector.OFFSET_WIDTH);
 
     // increase each offset from the second buffer
     for (int i = 0; i < deltaVector.getValueCount(); i++) {
@@ -443,16 +529,40 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
           .getOffsetBuffer()
           .setLong(
               (long) (targetVector.getValueCount() + 1 + i) * LargeListVector.OFFSET_WIDTH,
-              oldOffset + targetListSize);
+              oldOffset - deltaListStart + targetListSize);
     }
     targetListVector.setLastSet(newValueCount - 1);
 
     // append underlying vectors
-    VectorAppender innerAppender = new VectorAppender(targetListVector.getDataVector());
-    deltaVector.getDataVector().accept(innerAppender, null);
+    appendDataVector(
+        targetListVector.getDataVector(),
+        deltaVector.getDataVector(),
+        checkedCastToInt(deltaListStart),
+        checkedCastToInt(deltaListSize));
 
     targetVector.setValueCount(newValueCount);
     return targetVector;
+  }
+
+  /**
+   * Appends the range [start, start + length) of the delta vector's data vector to the target
+   * vector's data vector. The range may not cover the whole delta data vector when the delta's
+   * offset buffer does not start at zero.
+   */
+  private static void appendDataVector(
+      ValueVector targetDataVector, ValueVector deltaDataVector, int start, int length) {
+    if (start == 0 && length == deltaDataVector.getValueCount()) {
+      VectorAppender innerAppender = new VectorAppender(targetDataVector);
+      deltaDataVector.accept(innerAppender, null);
+      return;
+    }
+    TransferPair transferPair =
+        deltaDataVector.getTransferPair(deltaDataVector.getField(), deltaDataVector.getAllocator());
+    transferPair.splitAndTransfer(start, length);
+    try (ValueVector slicedDeltaDataVector = transferPair.getTo()) {
+      VectorAppender innerAppender = new VectorAppender(targetDataVector);
+      slicedDeltaDataVector.accept(innerAppender, null);
+    }
   }
 
   @Override
@@ -557,8 +667,7 @@ public class VectorAppender implements VectorVisitor<ValueVector, Void> {
     UnionVector targetUnionVector = (UnionVector) targetVector;
     int newValueCount = targetVector.getValueCount() + deltaVector.getValueCount();
 
-    // make sure there is enough capacity
-    while (targetUnionVector.getValueCapacity() < newValueCount) {
+    while (targetUnionVector.getTypeBuffer().capacity() / UnionVector.TYPE_WIDTH < newValueCount) {
       targetUnionVector.reAlloc();
     }
 

@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.stream.IntStream;
@@ -87,6 +88,7 @@ import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.arrow.vector.util.JsonStringArrayList;
 import org.apache.calcite.avatica.Meta.StatementType;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** An ad-hoc {@link FlightSqlProducer} for tests. */
 public final class MockFlightSqlProducer implements FlightSqlProducer {
@@ -101,8 +103,16 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
   private final SqlInfoBuilder sqlInfoBuilder = new SqlInfoBuilder();
   private final Map<String, Schema> parameterSchemas = new HashMap<>();
   private final Map<String, List<List<Object>>> expectedParameterValues = new HashMap<>();
+  private final Map<String, Boolean> isUpdateMap = new HashMap<>();
 
-  private final Map<String, Integer> actionTypeCounter = new HashMap<>();
+  private final Map<String, Integer> actionTypeCounter = new ConcurrentHashMap<>();
+  private final Map<String, Integer> commandTypeCounter = new ConcurrentHashMap<>();
+  private volatile @Nullable CallStatus closePreparedStatementFailure;
+
+  public static final String COMMAND_STATEMENT_QUERY = "statement_query";
+  public static final String COMMAND_STATEMENT_UPDATE = "statement_update";
+  public static final String COMMAND_PREPARED_STATEMENT_QUERY = "prepared_statement_query";
+  public static final String COMMAND_PREPARED_STATEMENT_UPDATE = "prepared_statement_update";
 
   private static FlightInfo getFlightInfoExportedAndImportedKeys(
       final Message message, final FlightDescriptor descriptor) {
@@ -177,6 +187,40 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
   }
 
   /**
+   * Registers a new {@link StatementType#SELECT} SQL query, optionally setting the is_update field.
+   *
+   * @param sqlCommand the SQL command under which to register the new query.
+   * @param schema the schema to use for the query result.
+   * @param resultProviders the result provider for this query.
+   * @param isUpdate value to report for the is_update field, or {@code null} to leave it unset.
+   */
+  public void addSelectQuery(
+      final String sqlCommand,
+      final Schema schema,
+      final List<Consumer<ServerStreamListener>> resultProviders,
+      final @Nullable Boolean isUpdate) {
+    addSelectQuery(sqlCommand, schema, resultProviders);
+    if (isUpdate != null) {
+      isUpdateMap.put(sqlCommand, isUpdate);
+    }
+  }
+
+  /**
+   * Registers a new {@link StatementType#UPDATE} SQL query, optionally setting the is_update field.
+   *
+   * @param sqlCommand the SQL command.
+   * @param updatedRows the number of rows affected.
+   * @param isUpdate value to report for the is_update field, or {@code null} to leave it unset.
+   */
+  public void addUpdateQuery(
+      final String sqlCommand, final long updatedRows, final @Nullable Boolean isUpdate) {
+    addUpdateQuery(sqlCommand, updatedRows);
+    if (isUpdate != null) {
+      isUpdateMap.put(sqlCommand, isUpdate);
+    }
+  }
+
+  /**
    * Adds a catalog query to the results.
    *
    * @param message the {@link Message} corresponding to the catalog query request type to register.
@@ -247,6 +291,12 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
         resultBuilder.setParameterSchema(ByteString.copyFrom(outputStream.toByteArray()));
       }
 
+      // Set is_update field if present
+      final Boolean isUpdate = isUpdateMap.get(query);
+      if (isUpdate != null) {
+        resultBuilder.setIsUpdate(isUpdate);
+      }
+
       listener.onNext(new Result(pack(resultBuilder.build()).toByteArray()));
     } catch (final Throwable t) {
       listener.onError(t);
@@ -260,8 +310,16 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
       final ActionClosePreparedStatementRequest actionClosePreparedStatementRequest,
       final CallContext callContext,
       final StreamListener<Result> streamListener) {
-    // TODO Implement this method.
-    streamListener.onCompleted();
+    final CallStatus failure = closePreparedStatementFailure;
+    if (failure == null) {
+      streamListener.onCompleted();
+    } else {
+      streamListener.onError(failure.toRuntimeException());
+    }
+  }
+
+  public void setClosePreparedStatementFailure(final @Nullable CallStatus failure) {
+    closePreparedStatementFailure = failure;
   }
 
   @Override
@@ -269,6 +327,7 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
       final CommandStatementQuery commandStatementQuery,
       final CallContext callContext,
       final FlightDescriptor flightDescriptor) {
+    incrementCommandTypeCounter(COMMAND_STATEMENT_QUERY);
     final String query = commandStatementQuery.getQuery();
     final Entry<Schema, List<UUID>> queryInfo =
         Preconditions.checkNotNull(
@@ -289,6 +348,7 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
       final CommandPreparedStatementQuery commandPreparedStatementQuery,
       final CallContext callContext,
       final FlightDescriptor flightDescriptor) {
+    incrementCommandTypeCounter(COMMAND_PREPARED_STATEMENT_QUERY);
     final ByteString preparedStatementHandle =
         commandPreparedStatementQuery.getPreparedStatementHandle();
 
@@ -356,8 +416,15 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
       final CallContext callContext,
       final FlightStream flightStream,
       final StreamListener<PutResult> streamListener) {
+    incrementCommandTypeCounter(COMMAND_STATEMENT_UPDATE);
+    return acceptUpdate(commandStatementUpdate.getQuery(), flightStream, streamListener);
+  }
+
+  private Runnable acceptUpdate(
+      final String query,
+      final FlightStream flightStream,
+      final StreamListener<PutResult> streamListener) {
     return () -> {
-      final String query = commandStatementUpdate.getQuery();
       final BiConsumer<FlightStream, StreamListener<PutResult>> resultProvider =
           Preconditions.checkNotNull(
               updateResultProviders.get(query),
@@ -429,6 +496,7 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
       final CallContext callContext,
       final FlightStream flightStream,
       final StreamListener<PutResult> streamListener) {
+    incrementCommandTypeCounter(COMMAND_PREPARED_STATEMENT_UPDATE);
     final ByteString handle = commandPreparedStatementUpdate.getPreparedStatementHandle();
     final String query =
         Preconditions.checkNotNull(
@@ -439,11 +507,7 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
       return () -> {};
     }
 
-    return acceptPutStatement(
-        CommandStatementUpdate.newBuilder().setQuery(query).build(),
-        callContext,
-        flightStream,
-        streamListener);
+    return acceptUpdate(query, flightStream, streamListener);
   }
 
   @Override
@@ -638,9 +702,8 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
 
   @Override
   public void doAction(CallContext context, Action action, StreamListener<Result> listener) {
+    actionTypeCounter.merge(action.getType(), 1, Integer::sum);
     FlightSqlProducer.super.doAction(context, action, listener);
-    actionTypeCounter.put(
-        action.getType(), actionTypeCounter.getOrDefault(action.getType(), 0) + 1);
   }
 
   /**
@@ -651,8 +714,20 @@ public final class MockFlightSqlProducer implements FlightSqlProducer {
     actionTypeCounter.clear();
   }
 
+  public void clearCommandTypeCounter() {
+    commandTypeCounter.clear();
+  }
+
   public Map<String, Integer> getActionTypeCounter() {
     return actionTypeCounter;
+  }
+
+  public Map<String, Integer> getCommandTypeCounter() {
+    return commandTypeCounter;
+  }
+
+  private void incrementCommandTypeCounter(String commandType) {
+    commandTypeCounter.merge(commandType, 1, Integer::sum);
   }
 
   private void getStreamCatalogFunctions(

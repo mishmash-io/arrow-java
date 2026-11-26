@@ -26,6 +26,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import com.google.protobuf.Message;
+import java.io.IOException;
+import java.net.Proxy;
+import java.net.ProxySelector;
+import java.net.SocketAddress;
+import java.net.URI;
 import java.net.URISyntaxException;
 import java.sql.Connection;
 import java.sql.Driver;
@@ -33,8 +38,10 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.apache.arrow.driver.jdbc.authentication.UserPasswordAuthentication;
 import org.apache.arrow.driver.jdbc.client.ArrowFlightSqlClientHandler;
@@ -56,6 +63,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Tests for {@link Connection}. */
 public class ConnectionTest {
@@ -197,13 +206,12 @@ public class ConnectionTest {
   }
 
   /**
-   * Checks if the exception IllegalArgumentException is thrown when trying to establish an
-   * unencrypted connection providing with an invalid port.
-   *
-   * @throws SQLException on error.
+   * Checks if a SQLException is thrown when trying to establish an unencrypted connection with an
+   * invalid port.
    */
-  @Test
-  public void testUnencryptedConnectionProvidingInvalidPort() throws Exception {
+  @ParameterizedTest
+  @ValueSource(ints = {0, -1, 65536, 65537})
+  public void testUnencryptedConnectionProvidingInvalidPort(int invalidPort) {
     final Properties properties = new Properties();
 
     properties.put(ArrowFlightConnectionProperty.HOST.camelName(), "localhost");
@@ -211,7 +219,7 @@ public class ConnectionTest {
     properties.put(ArrowFlightConnectionProperty.PASSWORD.camelName(), passTest);
     properties.put(ArrowFlightConnectionProperty.USE_ENCRYPTION.camelName(), false);
     final String invalidUrl =
-        "jdbc:arrow-flight-sql://" + FLIGHT_SERVER_TEST_EXTENSION.getHost() + ":" + 65537;
+        "jdbc:arrow-flight-sql://" + FLIGHT_SERVER_TEST_EXTENSION.getHost() + ":" + invalidPort;
 
     assertThrows(
         SQLException.class,
@@ -233,6 +241,7 @@ public class ConnectionTest {
     try (ArrowFlightSqlClientHandler client =
         new ArrowFlightSqlClientHandler.Builder()
             .withHost(FLIGHT_SERVER_TEST_EXTENSION.getHost())
+            .withPort(FLIGHT_SERVER_TEST_EXTENSION.getPort())
             .withBufferAllocator(allocator)
             .withEncryption(false)
             .build()) {
@@ -766,6 +775,41 @@ public class ConnectionTest {
     // assert the ResultSets are closed
     for (int i = 0; i < numResultSets; i++) {
       assertTrue(resultSets[i].isClosed());
+    }
+  }
+
+  @Test
+  public void testJdbcDriverConsultsProxySelectorForTcpConnections() throws Exception {
+    AtomicBoolean consulted = new AtomicBoolean(false);
+    ProxySelector original = ProxySelector.getDefault();
+    ProxySelector.setDefault(
+        new ProxySelector() {
+          @Override
+          public List<Proxy> select(URI uri) {
+            consulted.set(true);
+            return original.select(uri);
+          }
+
+          @Override
+          public void connectFailed(URI uri, SocketAddress sa, IOException e) {}
+        });
+
+    try {
+      final Properties properties = new Properties();
+      properties.put(ArrowFlightConnectionProperty.USER.camelName(), userTest);
+      properties.put(ArrowFlightConnectionProperty.PASSWORD.camelName(), passTest);
+      properties.put("useEncryption", false);
+
+      DriverManager.getConnection(
+              "jdbc:arrow-flight-sql://localhost:" + FLIGHT_SERVER_TEST_EXTENSION.getPort(),
+              properties)
+          .close();
+
+      assertTrue(
+          consulted.get(),
+          "JDBC driver must consult ProxySelector so JVM proxy settings are respected");
+    } finally {
+      ProxySelector.setDefault(original);
     }
   }
 }
